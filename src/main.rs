@@ -1,421 +1,226 @@
-use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::process::id;
-use std::sync::{Arc, Mutex};
+use std::env;
 
-use clap::Parser;
-use tokio::time::Duration;
+#[derive(Debug)]
+enum CommandParseError {
+    WrongCommand,
+    TooLessArg,
+    TooMuchArg,
+    SyntaxError(String),
+    TypeParse(String),
+}
 
-mod command;
-mod command_strategies;
-mod db;
-mod interface;
-mod persistence;
-mod session;
-mod tools;
+type CommandParseResult<T> = Result<T, CommandParseError>;
 
-use command_strategies::init_command_strategies;
-use persistence::rdb::Rdb;
-use persistence::rdb_count::RdbCount;
-use persistence::rdb_scheduler::RdbScheduler;
-use tools::resp::RespValue;
+trait Command {
+    fn execute(&self) -> String;
+    fn debug_msg(&self) -> String;
+}
+fn check_name_and_len(
+    first: &str,
+    name: &str,
+    len: usize,
+    min_len: usize,
+    max_len: Option<usize>,
+) -> CommandParseResult<()> {
+    if len < min_len {
+        return Err(CommandParseError::TooLessArg);
+    }
+    if let Some(max_len) = max_len {
+        if len > max_len {
+            return Err(CommandParseError::TooMuchArg);
+        };
+    }
+    if !first.eq_ignore_ascii_case(name) {
+        return Err(CommandParseError::WrongCommand);
+    }
+    Ok(())
+}
 
-use crate::db::db::Redis;
-use crate::db::db_config::RedisConfig;
-use crate::interface::command_type::CommandType;
-use crate::persistence::aof::Aof;
-use crate::session::session::Session;
+#[derive(Debug)]
+struct UnKnowCommand {}
 
-#[tokio::main]
-async fn main() {
-    // parse args
-    let cli = crate::tools::cli::Cli::parse();
-
-    /*
-     * 初始日志框架
-     *
-     * (1) 日志级别
-     * (2) 框架加载
-     */
-    std::env::set_var("RUST_LOG", cli.log_level.as_str().to_lowercase());
-    env_logger::init();
-
-    /*
-     * 创建默认配置
-     */
-    // get config from cli
-    let redis_config: Arc<RedisConfig> = Arc::new(cli.into());
-    // let redis_config = Arc::new(RedisConfig::default());
-
-    /*
-     * 创建通讯服务
-     */
-    let port: u16 = redis_config.port;
-    let string_addr = format!("{}:{}", redis_config.bind, port);
-    let socket_addr = match string_addr.to_socket_addrs() {
-        Ok(mut addr_iter) => addr_iter.next().unwrap(),
-        Err(e) => {
-            eprintln!("Failed to resolve bind address: {}", e);
-            return;
-        }
-    };
-    let address = SocketAddr::new(socket_addr.ip(), socket_addr.port());
-    let sessions: Arc<Mutex<HashMap<String, Session>>> = Arc::new(Mutex::new(HashMap::new()));
-    let redis = Arc::new(Mutex::new(Redis::new(redis_config.clone())));
-    let listener = TcpListener::bind(address).unwrap();
-
-    let aof = Arc::new(Mutex::new(Aof::new(redis_config.clone(), redis.clone())));
-    let rdb = Arc::new(Mutex::new(Rdb::new(redis_config.clone(), redis.clone())));
-
-    println_banner(port);
-
-    if redis_config.appendonly {
-        match aof.lock() {
-            Ok(mut file) => {
-                log::info!("Start loading appendfile");
-                file.load();
-            }
-            Err(err) => {
-                eprintln!("Failed to acquire lock: {:?}", err);
-                return;
-            }
-        }
-    } else {
-        match rdb.lock() {
-            Ok(mut file) => {
-                log::info!("Start loading dump.rdb");
-                file.load();
-            }
-            Err(err) => {
-                eprintln!("Failed to acquire lock: {:?}", err);
-                return;
-            }
-        }
+impl Command for UnKnowCommand {
+    fn execute(&self) -> String {
+        format!("UnKnowCommand")
     }
 
-    log::info!("Server initialized");
-    log::info!("Ready to accept connections");
+    fn debug_msg(&self) -> String {
+        format!("{:#?}", self)
+    }
+}
+impl TryFrom<Vec<&str>> for UnKnowCommand {
+    type Error = CommandParseError;
 
-    let rc = Arc::clone(&redis);
-    let rcc = Arc::clone(&redis_config);
+    fn try_from(_value: Vec<&str>) -> Result<Self, Self::Error> {
+        Err(CommandParseError::WrongCommand)
+    }
+}
 
-    // 检测过期
-    tokio::spawn(async move {
-        loop {
-            rc.lock().unwrap().check_all_database_ttl();
-            tokio::time::sleep(Duration::from_secs(1 / rcc.hz)).await;
-        }
-    });
+#[derive(Debug)]
+struct GetCommand {
+    key: String,
+}
 
-    // 保存策略
-    let arc_rdb_count = Arc::new(Mutex::new(RdbCount::new()));
-    let arc_rdb_scheduler = Arc::new(Mutex::new(RdbScheduler::new(rdb)));
-    if let Some(save_interval) = &redis_config.save {
-        arc_rdb_scheduler
-            .lock()
-            .unwrap()
-            .execute(save_interval, arc_rdb_count.clone());
+impl Command for GetCommand {
+    fn execute(&self) -> String {
+        format!("GET {}", self.key)
     }
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let redis_clone = Arc::clone(&redis);
-                let redis_config_clone = Arc::clone(&redis_config);
-                let sessions_clone = Arc::clone(&sessions);
-                let rdb_count_clone = Arc::clone(&arc_rdb_count);
-                let aof_clone = Arc::clone(&aof);
-                tokio::spawn(async move {
-                    connection(
-                        stream,
-                        redis_clone,
-                        redis_config_clone,
-                        sessions_clone,
-                        rdb_count_clone,
-                        aof_clone,
-                    );
-                });
+    fn debug_msg(&self) -> String {
+        format!("{:#?}", self)
+    }
+}
+
+impl TryFrom<Vec<&str>> for GetCommand {
+    type Error = CommandParseError;
+
+    fn try_from(value: Vec<&str>) -> Result<Self, Self::Error> {
+        check_name_and_len(&value[0], "GET", value.len(), 2, Some(2))?;
+        let key = value[1].to_owned();
+        Ok(GetCommand { key })
+    }
+}
+#[derive(Debug)]
+enum SetExist {
+    NX,
+    XX,
+}
+#[derive(Debug)]
+enum SetExpire {
+    EX(u64),
+    PX(u64),
+    EXAT(u64),
+    PXAT(u64),
+    KEEPTTL,
+}
+
+#[derive(Default, Debug)]
+struct SetCommand {
+    key: String,
+    value: String,
+    exist: Option<SetExist>,
+    get: bool,
+    expire: Option<SetExpire>,
+}
+
+impl SetCommand {
+    fn set_exist(&mut self, name: &str) -> CommandParseResult<()> {
+        if self.exist.is_some() {
+            return Err(CommandParseError::SyntaxError(
+                "Too much exist arg".to_string(),
+            ));
+        };
+        match name {
+            "NX" => self.exist = Some(SetExist::NX),
+            "XX" => self.exist = Some(SetExist::XX),
+            _ => {}
+        }
+        Ok(())
+    }
+    fn set_expire(&mut self, name: &str, arg: Option<&&str>) -> CommandParseResult<()> {
+        if self.expire.is_some() {
+            return Err(CommandParseError::SyntaxError(
+                "Too much expire arg".to_string(),
+            ));
+        };
+        if arg.is_none() {
+            if name == "KEEPTTL" {
+                self.expire = Some(SetExpire::KEEPTTL);
+                return Ok(());
+            } else {
+                return Err(CommandParseError::SyntaxError(format!(
+                    "{} need one arg",
+                    name
+                )));
+            }
+        }
+        let arg = arg.unwrap().parse::<u64>();
+        match arg {
+            Ok(arg) => {
+                match name {
+                    "EX" => self.expire = Some(SetExpire::EX(arg)),
+                    "PX" => self.expire = Some(SetExpire::PX(arg)),
+                    "EXAT" => self.expire = Some(SetExpire::EXAT(arg)),
+                    "PXAT" => self.expire = Some(SetExpire::PXAT(arg)),
+                    _ => {}
+                };
             }
             Err(e) => {
-                println!("error: {}", e);
+                return Err(CommandParseError::TypeParse(format!(
+                    "Parse {} arg Error: {}",
+                    name,
+                    e.to_string()
+                )))
             }
         }
+        Ok(())
     }
 }
 
-// 处理 Tcp 链接
-fn connection(
-    mut stream: TcpStream,
-    redis: Arc<Mutex<Redis>>,
-    redis_config: Arc<RedisConfig>,
-    sessions: Arc<Mutex<HashMap<String, Session>>>,
-    rdb_count: Arc<Mutex<RdbCount>>,
-    aof: Arc<Mutex<Aof>>,
-) {
-    /*
-     * 声明变量
-     *
-     * @param command_strategies 命令集合
-     * @param session_id 会话编号
-     * @param buff 缓冲区
-     * @param buff_list 消息列表
-     * @param read_size 读取长度
-     */
-    let command_strategies = init_command_strategies();
-    let session_id = stream.peer_addr().unwrap().to_string();
-    let mut buff = [0; 512];
-    let mut buff_list = Vec::new();
-    let mut read_size = 0;
-
-    {
-        /*
-         * 创建会话
-         *
-         * （1）判定 session 数量是否超出阈值 {maxclients}
-         * （2）满足：响应 ERR max number of clients reached 错误
-         * （3）否则：创建 session 会话
-         */
-        let mut sessions_ref = sessions.lock().unwrap();
-        if redis_config.maxclients == 0 || sessions_ref.len() < redis_config.maxclients {
-            sessions_ref.insert(session_id.clone(), Session::new());
-        } else {
-            let err = "ERR max number of clients reached".to_string();
-            let resp_value = RespValue::Error(err).to_bytes();
-            match stream.write(&resp_value) {
-                Ok(_bytes_written) => {
-                    // END
-                }
-                Err(e) => {
-                    eprintln!("Failed to write to stream: {}", e);
-                }
-            }
-            return;
-        }
+impl Command for SetCommand {
+    fn execute(&self) -> String {
+        format!(
+            "{} {} {:?} {:?} {:?}",
+            self.key, self.value, self.exist, self.get, self.expire
+        )
     }
+    fn debug_msg(&self) -> String {
+        format!("{:#?}", self)
+    }
+}
+const EXIST_NAME: [&str; 2] = ["NX", "XX"];
+const EXPIRE_NAME: [&str; 5] = ["EX", "PX", "EXAT", "PXAT", "KEEPTTL"];
+impl TryFrom<Vec<&str>> for SetCommand {
+    type Error = CommandParseError;
 
-    'main: loop {
-        match stream.read(&mut buff) {
-            Ok(size) => {
-                if size == 0 {
-                    break 'main;
-                }
-
-                buff_list.extend_from_slice(&buff[..size]);
-                read_size += size;
-
-                if size < 512 {
-                    /*
-                     * 解析命令
-                     *
-                     * body: 消息体
-                     * fragments: 消息片段
-                     * command: 命令
-                     */
-
-                    let bytes = &buff_list[..read_size];
-                    let body = std::str::from_utf8(bytes).unwrap();
-                    let fragments: Vec<&str> = body.split("\r\n").collect();
-                    let command = fragments[2];
-
-                    {
-                        /*
-                         * 安全认证【前置拦截】
-                         *
-                         * 如果配置了密码，该命令不是 auth 指令，且用户未登录
-                         */
-                        let sessions_ref = sessions.lock().unwrap();
-                        let session = sessions_ref.get(&session_id).unwrap();
-                        let is_not_auth_command = command.to_uppercase() != "AUTH";
-                        let is_not_auth = !session.get_authenticated();
-                        if redis_config.password.is_some() && is_not_auth && is_not_auth_command {
-                            let response_value = "ERR Authentication required".to_string();
-                            let response_bytes = &RespValue::Error(response_value).to_bytes();
-                            match stream.write(response_bytes) {
-                                Ok(_bytes_written) => {
-                                    // Response successful
-                                }
-                                Err(e) => {
-                                    eprintln!("Failed to write to stream: {}", e);
-                                }
-                            };
-                            continue 'main;
-                        }
-                    }
-
-                    /*
-                     * 执行命令
-                     *
-                     * 利用策略模式，根据 command 获取具体实现，
-                     * 否则响应 PONG 内容。
-                     */
-                    if let Some(strategy) = command_strategies.get(command.to_uppercase().as_str())
-                    {
-                        strategy.execute(
-                            Some(&mut stream),
-                            &fragments,
-                            &redis,
-                            &redis_config,
-                            &sessions,
-                            &session_id,
-                        );
-
-                        /*
-                         * 假定是个影响内存的命令，记录到日志，
-                         *【备份与恢复】中的恢复。
-                         */
-                        if let CommandType::Write = strategy.command_type() {
-                            rdb_count.lock().unwrap().calc();
-                            match aof.lock() {
-                                Ok(mut aof_ref) => {
-                                    aof_ref.save(&fragments.join("\\r\\n"));
-                                }
-                                Err(_) => {
-                                    eprintln!("Failed to acquire lock on AOF");
-                                    return;
-                                }
-                            };
-                        }
-                    } else {
-                        let response_value = "PONG".to_string();
-                        let response_bytes = &RespValue::SimpleString(response_value).to_bytes();
-                        match stream.write(response_bytes) {
-                            Ok(_bytes_written) => {
-                                // END
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to write to stream: {}", e);
-                            }
-                        }
-                    }
-
-                    /*
-                     * 完成命令的执行后
-                     *
-                     * buff_list.shrink_to_fit(); 释放内存
-                     */
-                    buff_list.clear();
-                    buff_list.shrink_to_fit();
-                    read_size = 0;
-                }
+    fn try_from(value: Vec<&str>) -> Result<Self, Self::Error> {
+        let len = value.len();
+        check_name_and_len(&value[0], "SET", len, 3, Some(7))?;
+        let mut command = SetCommand::default();
+        command.key = value[1].to_owned();
+        command.value = value[2].to_owned();
+        let mut i = value.iter().skip(3);
+        loop {
+            let v = i.next();
+            if v.is_none() {
+                break;
             }
-            Err(_e) => {
-                /*
-                 * 销毁会话
-                 *
-                 * @param session_id 会话编号
-                 */
-                let mut session_manager_ref = sessions.lock().unwrap();
-                session_manager_ref.remove(&session_id);
-                break 'main;
+            let v = v.unwrap();
+
+            if EXIST_NAME.contains(v) {
+                command.set_exist(v)?;
+            }
+            if EXPIRE_NAME.contains(v) {
+                command.set_expire(v, i.next())?;
+            }
+            if *v == "GET" {
+                command.get = true;
             }
         }
+        Ok(command)
     }
 }
 
-/*
- * 启动服务
- */
-fn println_banner(port: u16) {
-    let version = env!("CARGO_PKG_VERSION");
-    let pattern = format!(
-        r#"
-         /\_____/\
-        /  o   o  \          Rudis {}
-       ( ==  ^  == )
-        )         (          Bind: {} PID: {}
-       (           )
-      ( (  )   (  ) )
-     (__(__)___(__)__)
-    "#,
-        version,
-        port,
-        id()
-    );
-    println!("{}", pattern);
+fn parse(args: Vec<&str>) -> CommandParseResult<Box<dyn Command>> {
+    match args[0].to_uppercase().as_str() {
+        "SET" => Ok(Box::new(SetCommand::try_from(args)?)),
+        "GET" => Ok(Box::new(GetCommand::try_from(args)?)),
+        _ => Ok(Box::new(UnKnowCommand {})),
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::db::db_config::RedisConfig;
-    use crate::tools::cli;
-    use clap::Parser;
-    #[test]
-    fn test_config_file() {
-        let port = 42800;
-        let config_file_path = "./release/linux/rudis-server.properties";
-        let arg_string = format!(
-            "rudis-server \
-            -p {} \
-            --config {}",
-            port, config_file_path
-        );
-        let args: Vec<&str> = arg_string.split(' ').collect();
-        let cli = cli::Cli::parse_from(args);
-        let config: RedisConfig = cli.into();
-        assert_eq!(config.port, port);
-        assert_eq!(config.maxclients, 1000);
-        assert_eq!(config.password, None);
-    }
-    #[test]
-    fn test_cli() {
-        let bind = "192.168.1.2";
-        let port = 6379;
-        let password = "123456";
-        let databases = 1;
-        let dbfilename = "123.rdb";
-        let appendfilename = "321.aof";
-        let appendonly = "false";
-        let hz = 2;
-        let appendfsync = "asd";
-        let maxclients = 100;
-        let dir = "/home/rudis";
-        let save_1 = "60/3";
-        let save_2 = "20/1";
-        let save = "60 3 20 1";
-        let arg_string = format!(
-            "rudis-server \
-            --bind {} \
-            -p {} \
-            --password {} \
-            --databases {} \
-            --dbfilename {} \
-            --appendfilename {} \
-            --hz {} \
-            --appendfsync {} \
-            --maxclients {} \
-            --dir {} \
-            --save {} \
-            --save {} \
-            --appendonly {}",
-            bind,
-            port,
-            password,
-            databases,
-            dbfilename,
-            appendfilename,
-            hz,
-            appendfsync,
-            maxclients,
-            dir,
-            save_1,
-            save_2,
-            appendonly
-        );
+// fn parse_command_str(command_str: &str) -> Vec<&str> {
 
-        let args: Vec<&str> = arg_string.split(' ').collect();
-        let cli = cli::Cli::parse_from(args);
-        let config: RedisConfig = cli.into();
-        assert_eq!(config.bind, bind.to_string());
-        assert_eq!(config.port, port);
-        assert_eq!(config.password, Some(password.to_string()));
-        assert_eq!(config.databases, databases);
-        assert_eq!(config.dbfilename, Some(dbfilename.to_string()));
-        assert_eq!(config.appendfilename, Some(appendfilename.to_string()));
-        assert_eq!(config.appendonly.to_string(), appendonly);
-        assert_eq!(config.appendfsync, Some(appendfsync.to_string()));
-        assert_eq!(config.maxclients, maxclients);
-        assert_eq!(config.dir, dir.to_string());
-        assert_eq!(config.save, Some(save.to_string()))
+// }
+
+fn main() {
+    let arg_str = env::args().skip(1).collect::<Vec<String>>();
+    let args: Vec<&str> = arg_str.iter().map(|x| x.as_str()).collect();
+    match parse(args) {
+        Ok(command) => {
+            println!("{}", command.debug_msg());
+            println!("{}", command.execute());
+        }
+        Err(e) => println!("{:#?}", e),
     }
 }
