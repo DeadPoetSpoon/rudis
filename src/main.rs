@@ -1,7 +1,8 @@
-use std::{env, time::Duration};
-
-use bytes::BytesMut;
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}};
+use std::time::Duration;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 
 #[derive(Debug)]
 enum CommandParseError {
@@ -34,7 +35,7 @@ fn check_name_and_len(
             return Err(CommandParseError::TooMuchArg);
         };
     }
-    if !first.eq_ignore_ascii_case(name) {
+    if first != name {
         return Err(CommandParseError::WrongCommand);
     }
     Ok(())
@@ -79,7 +80,7 @@ impl TryFrom<Vec<&str>> for GetCommand {
     type Error = CommandParseError;
 
     fn try_from(value: Vec<&str>) -> Result<Self, Self::Error> {
-        check_name_and_len(&value, "GET",  2, Some(2))?;
+        check_name_and_len(&value, "GET", 2, Some(2))?;
         let key = value[1].to_owned();
         Ok(GetCommand { key })
     }
@@ -154,8 +155,7 @@ impl SetCommand {
             Err(e) => {
                 return Err(CommandParseError::TypeParse(format!(
                     "Parse {} arg Error: {}",
-                    name,
-                    e
+                    name, e
                 )))
             }
         }
@@ -166,7 +166,7 @@ impl SetCommand {
 impl Command for SetCommand {
     fn execute(&self) -> String {
         format!(
-            "{} {} {:?} {:?} {:?}",
+            "SET {} {} {:?} {:?} {:?}",
             self.key, self.value, self.exist, self.get, self.expire
         )
     }
@@ -182,7 +182,7 @@ impl TryFrom<Vec<&str>> for SetCommand {
     fn try_from(value: Vec<&str>) -> Result<Self, Self::Error> {
         check_name_and_len(&value, "SET", 3, Some(7))?;
         let mut command = SetCommand {
-            key:  value[1].to_owned(),
+            key: value[1].to_owned(),
             value: value[2].to_owned(),
             ..Default::default()
         };
@@ -209,72 +209,217 @@ impl TryFrom<Vec<&str>> for SetCommand {
 }
 
 fn parse(args: Vec<&str>) -> CommandParseResult<Box<dyn Command>> {
-    match args[0].to_uppercase().as_str() {
+    match args[0] {
         "SET" => Ok(Box::new(SetCommand::try_from(args)?)),
         "GET" => Ok(Box::new(GetCommand::try_from(args)?)),
         _ => Ok(Box::new(UnKnowCommand {})),
     }
 }
 
-
 #[tokio::main]
 async fn main() {
-    
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
-    loop {
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let mut stream = TcpStream::connect("127.0.0.1:6379").await.unwrap();
-            let command = "*3$3\r\nset\r\n$2\r\nme\r\n$5\r\nrudis\r\n";
-            let _ = stream.write(command.as_bytes()).await;
-        });
-        let (mut socket, _) = listener.accept().await.unwrap();
-        'parse: loop {
-            let buf = socket.read_u8().await.unwrap();
-            let buf = socket.read_u8().await.unwrap();
-            if buf != b'*' {
-                continue;
-            }
-            let mut vec = Vec::new();
-            let mut vec_len = 0usize;
-            loop {
-                let buf = socket.read_u8().await.unwrap();
-                if buf == b'\r' {
-                    break;
-                }
-                let n = buf - b'0';
-                vec_len = vec_len * 10 + usize::from(n);
-            }
-            let _ = socket.read_u8().await.unwrap();
-            for _ in 0..vec_len {
-                let buf = socket.read_u8().await.unwrap();
-                if buf != b'$' {
-                    break 'parse;
-                }
-                let mut str_len = 0usize;
-                loop {
-                    let buf = socket.read_u8().await.unwrap();
-                    if buf == b'\r' {
-                        break;
-                    }
-                    let n = buf - b'0';
-                    str_len = str_len * 10 + usize::from(n);
-                }
-                let mut str_buf =BytesMut::with_capacity(str_len);
-                let _ = socket.read(&mut str_buf).await;
-                // let str = std::str::from_utf8(&str_buf).unwrap();
-                vec.push(str_buf)
-            }
-            println!("{:?}",vec);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut stream = TcpStream::connect("127.0.0.1:6379").await.unwrap();
+        let commands = [
+            // get me
+            "*2\r\n$3\r\nGET\r\n$2\r\nme\r\n",
+            // set me rudis
+            "*3\r\n$3\r\nSET\r\n$2\r\nme\r\n$5\r\nrudis\r\n",
+            // set me rudis XX
+            "*4\r\n$3\r\nSET\r\n$2\r\nme\r\n$5\r\nrudis\r\n$2\r\nXX\r\n",
+            // set me rudis PX 2
+            "*5\r\n$3\r\nSET\r\n$2\r\nme\r\n$5\r\nrudis\r\n$2\r\nPX\r\n$1\r\n2\r\n",
+            // set me rudis and more arg ignore
+            "*3\r\n$3\r\nSET\r\n$2\r\nme\r\n$5\r\nrudis\r\n$2\r\nXX\r\n",
+            // set me rudis PX will get SyntaxError
+            "*4\r\n$3\r\nSET\r\n$2\r\nme\r\n$5\r\nrudis\r\n$2\r\nPX\r\n",
+            // UnknowCommand
+            "*2\r\n$5\r\nRUDIS\r\n$2\r\nme\r\n",
+            // set error 00
+            "*3\r\n$3\r\nSET\r\n$5\r\nerror\r\n$2\r\n00\r\n",
+            // set error 01 but has something before the start will get right args
+            "asdw2*3\r\n$3\r\nSET\r\n$5\r\nerror\r\n$2\r\n01\r\n",
+            // set error 02 but has something before the start
+            // and something to the end will get right args
+            "asdw2*3\r\n$3\r\nSET\r\n$5\r\nerror\r\n$2\r\n02\r\nssss",
+            // set error 03 but has something (\rs\n)
+            // in the middle will get an error arg start
+            "*3\r\n$3\r\nSET\r\n$5\rs\nerror\r\n$2\r\n03\r\n",
+            // set error 04 but has something (err [s] or)
+            // in the middle will get an error arg start
+            "*3\r\n$3\r\nSET\r\n$5\r\nersror\r\n$2\r\n04\r\n",
+            // set error 05 but loss something in the middle will get an error arg start
+            "*3\r\n$3\r\nSET\r\n$5\r\nerro\r\n$2\r\n05\r\n",
+            // set error 06 but loss a \n in the middle will get an error arg start
+            "*3\r\n$3\r\nSET\r\n$5\rerror\r\n$2\r\n06\r\n",
+            // set error 07 but loss a \r in the middle
+            // will get unexpected error such as error arg len or arg len too much
+            "*3\r\n$3\r\nSET\r\n$5\nerror\r\n$2\r\n07\r\n",
+            // set error 08 but too much args len will get args too much
+            // or error arg start while having something behind
+            "*4\r\n$3\r\nSET\r\n$5\r\nerror\r\n$2\r\n08\r\n",
+            // set error 09 but loss too much will get arg len too much
+            // but may get [wrong command] args while having something behind
+            "*3\r\n$3\r\nSET\r\n$5\r\nerr",
+            // set error 10
+            "*3\r\n$3\r\nSET\r\n$5\r\nerror\r\n$2\r\n10\r\n",
+            // set error 11 but loss every thing behind * will get alone *
+            // or may get unexpected error such as args too much
+            // or [wrong command] while having something behind
+            "*3",
+            // set error 12
+            "*3\r\n$3\r\nSET\r\n$5\r\nerror\r\n$2\r\n12\r\n",
+            // set error 13
+            "*3\r\n$3\r\nSET\r\n$5\r\nerror\r\n$2\r\n13\r\n",
+            // set error 14 but loss every thing behind $ will get alone $
+            // or may get unexpected error such as args too much
+            // or [wrong command] while having something behind
+            "*3\r\n$3\r\nSET\r\n$2\r\n",
+            // set error 15
+            "*3\r\n$3\r\nSET\r\n$5\r\nerror\r\n$2\r\n15\r\n",
+            // set error 16 will get alone *
+            "*vas",
+            // set error 17 will skip
+            "asdassddfsdf",
+        ];
+        for c in commands {
+            let _ = stream.write(c.as_bytes()).await;
         }
+        match stream.shutdown().await {
+            Ok(_) => {}
+            Err(e) => println!("shutdown error: {}", e),
+        };
+        for c in commands {
+            let mut stream = TcpStream::connect("127.0.0.1:6379").await.unwrap();
+            let _ = stream.write(c.as_bytes()).await;
+            match stream.shutdown().await {
+                Ok(_) => {}
+                Err(e) => println!("shutdown error: {}", e),
+            };
+        }
+    });
+    loop {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = Vec::new();
+        match socket.read_to_end(&mut buffer).await {
+            Ok(_) => {
+                println!("{:?}", std::str::from_utf8(&buffer));
+                let mut i = 0;
+                let buffer_len = buffer.len();
+                let mut command_arg = Vec::new();
+                'parse: while i < buffer_len {
+                    let buf = buffer[i];
+                    if buf != b'*' {
+                        i += 1;
+                        continue;
+                    }
+                    let start = i;
+                    let mut arg_buffer_size = 0usize;
+                    let mut args = Vec::new();
+                    let mut args_len = 0usize;
+                    loop {
+                        i += 1;
+                        if i >= buffer_len {
+                            println!("alone *");
+                            break 'parse;
+                        }
+                        let buf = buffer[i];
+                        if buf == b'\r' {
+                            arg_buffer_size += i - start + 2;
+                            i += 2;
+                            break;
+                        }
+                        match buf.checked_sub(b'0') {
+                            Some(n) => {
+                                args_len = args_len * 10 + usize::from(n);
+                            }
+                            None => {
+                                println!("error args len")
+                            }
+                        };
+                    }
+                    for _ in 0..args_len {
+                        if i >= buffer_len {
+                            println!("args too much");
+                            break 'parse;
+                        }
+                        let buf = buffer[i];
+                        // print!("{:?}", std::str::from_utf8(&[buf]));
+                        if buf != b'$' {
+                            println!("error arg start");
+                            continue 'parse;
+                        }
+                        let mut str_len = 0usize;
+                        let arg_start = i;
+                        loop {
+                            i += 1;
+                            if i >= buffer_len {
+                                println!("alone $");
+                                break 'parse;
+                            }
+                            let buf = buffer[i];
+                            if buf == b'\r' {
+                                arg_buffer_size += i - arg_start + 2;
+                                i += 2;
+                                break;
+                            }
+                            match buf.checked_sub(b'0') {
+                                Some(n) => {
+                                    str_len = str_len * 10 + usize::from(n);
+                                }
+                                None => {
+                                    println!("error arg len")
+                                }
+                            };
+                        }
+                        let arg_end = i + str_len;
+                        if arg_end >= buffer_len {
+                            println!("arg len too much");
+                            continue 'parse;
+                        }
+                        let str_buf = &buffer[i..i + str_len];
+                        match std::str::from_utf8(str_buf) {
+                            Ok(str) => args.push(str),
+                            Err(e) => {
+                                println!("{}", e)
+                            }
+                        };
+                        arg_buffer_size += str_len + 2;
+                        i = i + str_len + 2;
+                    }
+
+                    if args.len() != args_len {
+                        println!("args len not the real len");
+                        continue 'parse;
+                    } else {
+                        if i - start != arg_buffer_size {
+                            println!("error buffer end");
+                        } else {
+                            command_arg.push(args);
+                        }
+                    }
+                }
+                println!("{:?}", command_arg);
+                if !command_arg.is_empty() {
+                    for args in command_arg {
+                        match parse(args) {
+                            Ok(command) => {
+                                println!("{}", command.execute());
+                            }
+                            Err(e) => {
+                                println!("{:#?}", e)
+                            }
+                        };
+                    }
+                } else {
+                    println!("vec is empty");
+                }
+            }
+            Err(e) => {
+                println!("{}", e);
+            }
+        };
     }
-    // let arg_str = env::args().skip(1).collect::<Vec<String>>();
-    // let args: Vec<&str> = arg_str.iter().map(|x| x.as_str()).collect();
-    // match parse(args) {
-    //     Ok(command) => {
-    //         println!("{}", command.debug_msg());
-    //         println!("{}", command.execute());
-    //     }
-    //     Err(e) => println!("{:#?}", e),
-    // }
 }
