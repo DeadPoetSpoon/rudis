@@ -1,4 +1,7 @@
-use std::env;
+use std::{env, time::Duration};
+
+use bytes::BytesMut;
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}};
 
 #[derive(Debug)]
 enum CommandParseError {
@@ -16,12 +19,13 @@ trait Command {
     fn debug_msg(&self) -> String;
 }
 fn check_name_and_len(
-    first: &str,
+    value: &[&str],
     name: &str,
-    len: usize,
     min_len: usize,
     max_len: Option<usize>,
 ) -> CommandParseResult<()> {
+    let first = value[0];
+    let len = value.len();
     if len < min_len {
         return Err(CommandParseError::TooLessArg);
     }
@@ -41,7 +45,7 @@ struct UnKnowCommand {}
 
 impl Command for UnKnowCommand {
     fn execute(&self) -> String {
-        format!("UnKnowCommand")
+        "UnKnowCommand".to_string()
     }
 
     fn debug_msg(&self) -> String {
@@ -75,7 +79,7 @@ impl TryFrom<Vec<&str>> for GetCommand {
     type Error = CommandParseError;
 
     fn try_from(value: Vec<&str>) -> Result<Self, Self::Error> {
-        check_name_and_len(&value[0], "GET", value.len(), 2, Some(2))?;
+        check_name_and_len(&value, "GET",  2, Some(2))?;
         let key = value[1].to_owned();
         Ok(GetCommand { key })
     }
@@ -85,6 +89,8 @@ enum SetExist {
     NX,
     XX,
 }
+
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug)]
 enum SetExpire {
     EX(u64),
@@ -149,7 +155,7 @@ impl SetCommand {
                 return Err(CommandParseError::TypeParse(format!(
                     "Parse {} arg Error: {}",
                     name,
-                    e.to_string()
+                    e
                 )))
             }
         }
@@ -174,11 +180,12 @@ impl TryFrom<Vec<&str>> for SetCommand {
     type Error = CommandParseError;
 
     fn try_from(value: Vec<&str>) -> Result<Self, Self::Error> {
-        let len = value.len();
-        check_name_and_len(&value[0], "SET", len, 3, Some(7))?;
-        let mut command = SetCommand::default();
-        command.key = value[1].to_owned();
-        command.value = value[2].to_owned();
+        check_name_and_len(&value, "SET", 3, Some(7))?;
+        let mut command = SetCommand {
+            key:  value[1].to_owned(),
+            value: value[2].to_owned(),
+            ..Default::default()
+        };
         let mut i = value.iter().skip(3);
         loop {
             let v = i.next();
@@ -209,18 +216,65 @@ fn parse(args: Vec<&str>) -> CommandParseResult<Box<dyn Command>> {
     }
 }
 
-// fn parse_command_str(command_str: &str) -> Vec<&str> {
 
-// }
-
-fn main() {
-    let arg_str = env::args().skip(1).collect::<Vec<String>>();
-    let args: Vec<&str> = arg_str.iter().map(|x| x.as_str()).collect();
-    match parse(args) {
-        Ok(command) => {
-            println!("{}", command.debug_msg());
-            println!("{}", command.execute());
+#[tokio::main]
+async fn main() {
+    
+    let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
+    loop {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let mut stream = TcpStream::connect("127.0.0.1:6379").await.unwrap();
+            let command = "*3$3\r\nset\r\n$2\r\nme\r\n$5\r\nrudis\r\n";
+            let _ = stream.write(command.as_bytes()).await;
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        'parse: loop {
+            let buf = socket.read_u8().await.unwrap();
+            let buf = socket.read_u8().await.unwrap();
+            if buf != b'*' {
+                continue;
+            }
+            let mut vec = Vec::new();
+            let mut vec_len = 0usize;
+            loop {
+                let buf = socket.read_u8().await.unwrap();
+                if buf == b'\r' {
+                    break;
+                }
+                let n = buf - b'0';
+                vec_len = vec_len * 10 + usize::from(n);
+            }
+            let _ = socket.read_u8().await.unwrap();
+            for _ in 0..vec_len {
+                let buf = socket.read_u8().await.unwrap();
+                if buf != b'$' {
+                    break 'parse;
+                }
+                let mut str_len = 0usize;
+                loop {
+                    let buf = socket.read_u8().await.unwrap();
+                    if buf == b'\r' {
+                        break;
+                    }
+                    let n = buf - b'0';
+                    str_len = str_len * 10 + usize::from(n);
+                }
+                let mut str_buf =BytesMut::with_capacity(str_len);
+                let _ = socket.read(&mut str_buf).await;
+                // let str = std::str::from_utf8(&str_buf).unwrap();
+                vec.push(str_buf)
+            }
+            println!("{:?}",vec);
         }
-        Err(e) => println!("{:#?}", e),
     }
+    // let arg_str = env::args().skip(1).collect::<Vec<String>>();
+    // let args: Vec<&str> = arg_str.iter().map(|x| x.as_str()).collect();
+    // match parse(args) {
+    //     Ok(command) => {
+    //         println!("{}", command.debug_msg());
+    //         println!("{}", command.execute());
+    //     }
+    //     Err(e) => println!("{:#?}", e),
+    // }
 }
