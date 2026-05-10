@@ -1,4 +1,3 @@
-use redis::Commands;
 use std::collections::HashSet;
 
 #[tokio::test]
@@ -7,7 +6,10 @@ async fn test_srandmember_command() {
     let mut con = client.get_connection().unwrap();
 
     // clean up any keys that may be present
-    let _: () = redis::cmd("DEL").arg("test_srandmember_key").query(&mut con).unwrap_or(());
+    let _: () = redis::cmd("DEL")
+        .arg("test_srandmember_key")
+        .query(&mut con)
+        .unwrap_or(());
 
     // add elements to collections
     let _: () = redis::cmd("SADD")
@@ -42,7 +44,10 @@ async fn test_srandmember_with_positive_count() {
     let mut con = client.get_connection().unwrap();
 
     // clean up any keys that may be present
-    let _: () = redis::cmd("DEL").arg("test_srandmember_positive").query(&mut con).unwrap_or(());
+    let _: () = redis::cmd("DEL")
+        .arg("test_srandmember_positive")
+        .query(&mut con)
+        .unwrap_or(());
 
     // 添加元素到集合
     let _: () = redis::cmd("SADD")
@@ -62,13 +67,13 @@ async fn test_srandmember_with_positive_count() {
         .query(&mut con)
         .unwrap();
     assert_eq!(result.len(), 3);
-    
+
     // Verify that all elements are in the original collection
     let valid_items = vec!["one", "two", "three", "four", "five"];
     for item in &result {
         assert!(valid_items.contains(&item.as_str()));
     }
-    
+
     // verify that the element is not duplicated
     let mut seen = HashSet::new();
     for item in &result {
@@ -89,7 +94,10 @@ async fn test_srandmember_with_negative_count() {
     let mut con = client.get_connection().unwrap();
 
     // clean up any keys that may be present
-    let _: () = redis::cmd("DEL").arg("test_srandmember_negative").query(&mut con).unwrap_or(());
+    let _: () = redis::cmd("DEL")
+        .arg("test_srandmember_negative")
+        .query(&mut con)
+        .unwrap_or(());
 
     // add elements to collections
     let _: () = redis::cmd("SADD")
@@ -107,7 +115,7 @@ async fn test_srandmember_with_negative_count() {
         .query(&mut con)
         .unwrap();
     assert_eq!(result.len(), 5);
-    
+
     // Verify that all elements are in the original collection
     let valid_items = vec!["one", "two", "three"];
     for item in &result {
@@ -128,7 +136,10 @@ async fn test_srandmember_empty_set() {
     let mut con = client.get_connection().unwrap();
 
     // clean up any keys that may be present
-    let _: () = redis::cmd("DEL").arg("test_srandmember_empty").query(&mut con).unwrap_or(());
+    let _: () = redis::cmd("DEL")
+        .arg("test_srandmember_empty")
+        .query(&mut con)
+        .unwrap_or(());
 
     // Test SRANDMEMBER - empty collection, return nil
     let result: Option<String> = redis::cmd("SRANDMEMBER")
@@ -144,7 +155,10 @@ async fn test_srandmember_nonexistent_key() {
     let mut con = client.get_connection().unwrap();
 
     // clean up any keys that may be present
-    let _: () = redis::cmd("DEL").arg("test_srandmember_nonexistent").query(&mut con).unwrap_or(());
+    let _: () = redis::cmd("DEL")
+        .arg("test_srandmember_nonexistent")
+        .query(&mut con)
+        .unwrap_or(());
 
     // Test SRANDMEMBER - non-existent key, returns nil
     let result: Option<String> = redis::cmd("SRANDMEMBER")
@@ -153,4 +167,3 @@ async fn test_srandmember_nonexistent_key() {
         .unwrap();
     assert_eq!(result, None);
 }
-

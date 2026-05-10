@@ -1,5 +1,8 @@
+use bincode::{BorrowDecode, Decode, Encode};
+use rstar::{PointDistance, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
-use bincode::{Encode, Decode, BorrowDecode};
+
+use crate::store::geo::geohash::geohash_get_distance;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeoPoint {
     pub longitude: f64,
@@ -87,9 +90,29 @@ impl<'de, Context> BorrowDecode<'de, Context> for GeoPoint {
 // pub struct GeoFence {
 //     pub id: String,
 //     pub name: String,
-//     
+//
 //     //TODO:
 //     // 实际存储 geometry 会用到 geo crate 的类型，暂时用占位符或具体实现
-//     // pub geometry: geo::Polygon<f64>, 
+//     // pub geometry: geo::Polygon<f64>,
 //     pub properties: Option<serde_json::Value>,
 // }
+
+impl RTreeObject for GeoPoint {
+    type Envelope = AABB<(f64, f64)>;
+
+    fn envelope(&self) -> Self::Envelope {
+        AABB::from_corners(
+            (self.longitude - 1e-6, self.latitude - 1e-6),
+            (self.longitude + 1e-6, self.latitude + 1e-6),
+        )
+    }
+}
+
+impl PointDistance for GeoPoint {
+    fn distance_2(
+        &self,
+        point: &<Self::Envelope as rstar::Envelope>::Point,
+    ) -> <<Self::Envelope as rstar::Envelope>::Point as rstar::Point>::Scalar {
+        geohash_get_distance(self.longitude, self.latitude, point.0, point.1)
+    }
+}

@@ -1,20 +1,25 @@
-use std::collections::{BTreeMap, HashMap};
-use std::ops::Bound::Included;
 use anyhow::{Error, Result};
 use bincode::{BorrowDecode, Decode, Encode};
 use geojson::{GeoJson, Geometry, Value as GeoJsonValue};
+use rstar::PointDistance;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound::Included;
 
 use super::geohash::{
-    geohash_encode_wgs84, geohash_neighbors, geohash_estimate_steps_by_radius,
-    geohash_to_u64_range, geohash_get_distance, geohash_bits_to_base32,
-    geohash_bits_to_u64, geohash_u64_to_redis_52bit, 
-    GeoHashNeighbors,
-    GEO_STEP_MAX, GEO_STEP_REDIS,
+    geohash_bits_to_base32, geohash_bits_to_u64, geohash_encode_wgs84,
+    geohash_estimate_steps_by_radius, geohash_get_distance, geohash_neighbors,
+    geohash_to_u64_range, geohash_u64_to_redis_52bit, GeoHashNeighbors, GEO_STEP_MAX,
+    GEO_STEP_REDIS,
 };
 use super::types::GeoPoint;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum GeoUnit { Meters, Kilometers, Miles, Feet }
+pub enum GeoUnit {
+    Meters,
+    Kilometers,
+    Miles,
+    Feet,
+}
 
 impl GeoUnit {
     pub fn from_str(s: &str) -> Self {
@@ -73,7 +78,7 @@ impl Geo {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn add(&mut self, name: String, longitude: f64, latitude: f64) -> Result<i64> {
         let is_new = !self.member_index.contains_key(&name);
         let point = GeoPoint::new(name, longitude, latitude);
@@ -82,7 +87,9 @@ impl Geo {
     }
 
     pub fn add_from_geo_json(&mut self, json_str: &str) -> Result<i64> {
-        let geo_json: GeoJson = json_str.parse().map_err(|e: geojson::Error| Error::msg(e.to_string()))?;
+        let geo_json: GeoJson = json_str
+            .parse()
+            .map_err(|e: geojson::Error| Error::msg(e.to_string()))?;
 
         if let GeoJson::Feature(feature) = geo_json {
             // 彻底解构 feature，避免 partial move 错误
@@ -91,15 +98,16 @@ impl Geo {
             let properties = feature.properties;
 
             let p = match geometry {
-                Some(
-                    Geometry {
-                        value: GeoJsonValue::Point(vec), .. 
-                    }) => vec,
+                Some(Geometry {
+                    value: GeoJsonValue::Point(vec),
+                    ..
+                }) => vec,
                 _ => return Err(Error::msg("Only Point geometry supported")),
             };
 
             // 手动从 properties Option Map 中查找 name，如果找不到用 "unknown"
-            let name = properties.as_ref()
+            let name = properties
+                .as_ref()
                 .and_then(|props| props.get("name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
@@ -210,20 +218,23 @@ impl Geo {
         let radius_m = unit.to_meters(radius);
         let points = self.search_spatial_index(longitude, latitude, radius_m);
 
-        let mut results: Vec<GeoRadiusResult> = points.into_iter().map(|p| {
-            let dist_m = geohash_get_distance(longitude, latitude, p.longitude, p.latitude);
+        let mut results: Vec<GeoRadiusResult> = points
+            .into_iter()
+            .map(|p| {
+                let dist_m = geohash_get_distance(longitude, latitude, p.longitude, p.latitude);
 
-            let hash_bits = geohash_encode_wgs84(p.longitude, p.latitude, GEO_STEP_MAX);
-            let hash_u64 = hash_bits.map(geohash_bits_to_u64).unwrap_or(0);
+                let hash_bits = geohash_encode_wgs84(p.longitude, p.latitude, GEO_STEP_MAX);
+                let hash_u64 = hash_bits.map(geohash_bits_to_u64).unwrap_or(0);
 
-            GeoRadiusResult {
-                name: p.name.clone(),
-                longitude: p.longitude,
-                latitude: p.latitude,
-                distance: unit.from_meters(dist_m),
-                hash: geohash_u64_to_redis_52bit(hash_u64),
-            }
-        }).collect();
+                GeoRadiusResult {
+                    name: p.name.clone(),
+                    longitude: p.longitude,
+                    latitude: p.latitude,
+                    distance: unit.from_meters(dist_m),
+                    hash: geohash_u64_to_redis_52bit(hash_u64),
+                }
+            })
+            .collect();
 
         if options.sort_asc {
             results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
@@ -250,13 +261,22 @@ impl Geo {
 
         let areas = [
             center_hash,
-            neighbors.north, neighbors.south, neighbors.east, neighbors.west,
-            neighbors.north_east, neighbors.north_west, neighbors.south_east, neighbors.south_west,
+            neighbors.north,
+            neighbors.south,
+            neighbors.east,
+            neighbors.west,
+            neighbors.north_east,
+            neighbors.north_west,
+            neighbors.south_east,
+            neighbors.south_west,
         ];
 
         for area_hash in areas.iter() {
             let (min_u64, max_u64) = geohash_to_u64_range(*area_hash);
-            for (_, bucket) in self.spatial_index.range((Included(&min_u64), Included(&max_u64))) {
+            for (_, bucket) in self
+                .spatial_index
+                .range((Included(&min_u64), Included(&max_u64)))
+            {
                 for point in bucket {
                     let dist = geohash_get_distance(lon, lat, point.longitude, point.latitude);
                     if dist <= radius_m {
@@ -271,9 +291,20 @@ impl Geo {
 
 /// 持久化 (Encode/Decode for Geo)
 impl Encode for Geo {
-    fn encode<E: bincode::enc::Encoder>(&self, encoder: &mut E) -> Result<(), bincode::error::EncodeError> {
-        let items: Vec<(u64, Vec<GeoPoint>)> = self.spatial_index.iter().map(|(k, v)| (*k, v.clone())).collect();
-        let members: Vec<(String, u64)> = self.member_index.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        let items: Vec<(u64, Vec<GeoPoint>)> = self
+            .spatial_index
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        let members: Vec<(String, u64)> = self
+            .member_index
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
         items.encode(encoder)?;
         members.encode(encoder)?;
         Ok(())
@@ -281,7 +312,9 @@ impl Encode for Geo {
 }
 
 impl<Context> Decode<Context> for Geo {
-    fn decode<D: bincode::de::Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, bincode::error::DecodeError> {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
         let items: Vec<(u64, Vec<GeoPoint>)> = Vec::decode(decoder)?;
         let members: Vec<(String, u64)> = Vec::decode(decoder)?;
         Ok(Self {
@@ -291,12 +324,104 @@ impl<Context> Decode<Context> for Geo {
     }
 }
 impl<'de, Context> BorrowDecode<'de, Context> for Geo {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(decoder: &mut D) -> Result<Self, bincode::error::DecodeError> {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
         let items: Vec<(u64, Vec<GeoPoint>)> = Vec::borrow_decode(decoder)?;
         let members: Vec<(String, u64)> = Vec::borrow_decode(decoder)?;
         Ok(Self {
             spatial_index: items.into_iter().collect(),
             member_index: members.into_iter().collect(),
         })
+    }
+}
+
+struct LargeNodeParameters;
+
+impl rstar::RTreeParams for LargeNodeParameters {
+    const MIN_SIZE: usize = 10;
+    const MAX_SIZE: usize = 30;
+    const REINSERTION_COUNT: usize = 15;
+    type DefaultInsertionStrategy = rstar::RStarInsertionStrategy;
+}
+
+#[derive(Debug, Default)]
+pub struct GeoDatabase {
+    features: HashMap<String, GeoPoint>,
+    rtree: rstar::RTree<GeoPoint, LargeNodeParameters>,
+}
+
+impl GeoDatabase {
+    pub fn new_empty() -> Self {
+        GeoDatabase {
+            features: HashMap::new(),
+            rtree: rstar::RTree::new_with_params(),
+        }
+    }
+    pub fn new_bulk(points: Vec<(String, f64, f64)>) -> Self {
+        let geo_points = points
+            .into_iter()
+            .map(|(n, x, y)| GeoPoint {
+                longitude: x,
+                latitude: y,
+                name: n,
+                properties: None,
+            })
+            .collect::<Vec<_>>();
+        let mut features = HashMap::new();
+        for point in geo_points.iter() {
+            features.insert(point.name.clone(), point.clone());
+        }
+        let rtree = rstar::RTree::bulk_load_with_params(geo_points);
+        GeoDatabase { features, rtree }
+    }
+
+    pub fn add_point(&mut self, name: String, longitude: f64, latitude: f64) -> Result<i64> {
+        let is_new = !self.features.contains_key(&name);
+        self.rtree.insert(GeoPoint {
+            longitude,
+            latitude,
+            name,
+            properties: None,
+        });
+        Ok(if is_new { 1 } else { 0 })
+    }
+
+    pub fn radius(
+        &self,
+        longitude: f64,
+        latitude: f64,
+        radius: f64,
+        unit: GeoUnit,
+        options: &GeoRadiusOptions,
+    ) -> Vec<GeoRadiusResult> {
+        let radius_m = unit.to_meters(radius);
+        let points = self
+            .rtree
+            .locate_within_distance((longitude, latitude), radius_m);
+
+        let mut results: Vec<GeoRadiusResult> = points
+            .into_iter()
+            .map(|p| {
+                let dist_m = p.distance_2(&(longitude, latitude));
+                GeoRadiusResult {
+                    name: p.name.clone(),
+                    longitude: p.longitude,
+                    latitude: p.latitude,
+                    distance: unit.from_meters(dist_m),
+                    hash: 0,
+                }
+            })
+            .collect();
+
+        if options.sort_asc {
+            results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+        } else if options.sort_desc {
+            results.sort_by(|a, b| b.distance.partial_cmp(&a.distance).unwrap());
+        }
+        if let Some(n) = options.count {
+            results.truncate(n);
+        }
+        results
     }
 }

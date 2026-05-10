@@ -1,20 +1,10 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::Rng;
-use rudis_server::store::geo::geohash::{geohash_encode_wgs84, GEO_STEP_MAX};
-use rudis_server::store::geo::{Geo, GeoRadiusOptions, GeoUnit};
-
-fn criterion_benchmark(c: &mut Criterion) {
-    c.bench_function("geohash encode", |b| {
-        b.iter(|| {
-            // black_box 防止编译器优化
-            geohash_encode_wgs84(black_box(116.40), black_box(39.90), black_box(GEO_STEP_MAX))
-        })
-    });
-}
+use rudis_server::store::geo::{GeoDatabase, GeoRadiusOptions, GeoUnit};
 
 // 构造一个填充了 N 个点的引擎
-fn setup_engine(count: usize) -> Geo {
-    let mut geo = Geo::new();
+fn setup_engine(count: usize) -> GeoDatabase {
+    let mut geo = GeoDatabase::new_empty();
     let mut rng = rand::thread_rng();
 
     // 模拟北京范围内的密集点
@@ -22,13 +12,13 @@ fn setup_engine(count: usize) -> Geo {
         let lon = 116.0 + rng.gen::<f64>(); // 116.0 ~ 117.0
         let lat = 39.0 + rng.gen::<f64>(); // 39.0 ~ 40.0
         let name = format!("member_{}", i);
-        geo.add(name, lon, lat).unwrap();
+        geo.add_point(name, lon, lat).unwrap();
     }
     geo
 }
 
 fn bench_georadius(c: &mut Criterion) {
-    let mut group = c.benchmark_group("GeoEngine");
+    let mut group = c.benchmark_group("GeoEngineRTree");
 
     // 1. 准备数据：10万个点 (这在内存数据库里算中等规模)
     let engine = setup_engine(100_000);
@@ -38,7 +28,7 @@ fn bench_georadius(c: &mut Criterion) {
     let query_lat = 39.5;
 
     // 测试场景：搜索 5km 半径
-    group.bench_function("radius_5km_100k_points", |b| {
+    group.bench_function("radius_5km_100k_points_rtree", |b| {
         b.iter(|| {
             // 使用 black_box 防止编译器优化掉代码
             let res = engine.radius(
@@ -54,7 +44,7 @@ fn bench_georadius(c: &mut Criterion) {
     });
 
     // 测试场景：搜索 500m 半径 (更精细的 Range Scan)
-    group.bench_function("radius_500m_100k_points", |b| {
+    group.bench_function("radius_500m_100k_points_rtree", |b| {
         b.iter(|| {
             let res = engine.radius(
                 black_box(query_lon),
@@ -71,14 +61,14 @@ fn bench_georadius(c: &mut Criterion) {
 }
 
 fn bench_geoadd(c: &mut Criterion) {
-    let mut group = c.benchmark_group("GeoEngine_Write");
-    let mut engine = Geo::new();
+    let mut group = c.benchmark_group("GeoEngineRTree_Write");
+    let mut engine = GeoDatabase::new_empty();
     let mut i = 0;
 
-    group.bench_function("add_single_point", |b| {
+    group.bench_function("add_single_point_rtree", |b| {
         b.iter(|| {
             i += 1;
-            engine.add(format!("u_{}", i), 116.4, 39.9).unwrap();
+            engine.add_point(format!("u_{}", i), 116.4, 39.9).unwrap();
         })
     });
     group.finish();
@@ -87,16 +77,35 @@ fn bench_geoadd(c: &mut Criterion) {
 fn bench_geoadd_100k(c: &mut Criterion) {
     let count = 100_000;
     let mut rng = rand::thread_rng();
-    let mut group = c.benchmark_group("GeoEngine");
-    group.bench_function("geo_add_100K", |b| {
+    let mut group = c.benchmark_group("GeoEngineRTree_Write");
+    group.bench_function("geo_add_100K_rtree", |b| {
         b.iter(|| {
-            let mut geo = Geo::new();
+            let mut geo = GeoDatabase::new_empty();
             for i in 0..count {
                 let lon = 116.0 + rng.gen::<f64>(); // 116.0 ~ 117.0
                 let lat = 39.0 + rng.gen::<f64>(); // 39.0 ~ 40.0
                 let name = format!("member_{}", i);
-                geo.add(name, lon, lat).unwrap();
+                geo.add_point(name, lon, lat).unwrap();
             }
+        });
+    });
+    group.finish();
+}
+
+fn bench_geoadd_100k_bulk(c: &mut Criterion) {
+    let count = 100_000;
+    let mut rng = rand::thread_rng();
+    let mut group = c.benchmark_group("GeoEngineRTree_Write");
+    group.bench_function("geo_add_100K_rtree_bulk", |b| {
+        b.iter(|| {
+            let mut points = Vec::new();
+            for i in 0..count {
+                let lon = 116.0 + rng.gen::<f64>(); // 116.0 ~ 117.0
+                let lat = 39.0 + rng.gen::<f64>(); // 39.0 ~ 40.0
+                let name = format!("member_{}", i);
+                points.push((name, lon, lat));
+            }
+            let _geo = GeoDatabase::new_bulk(points);
         });
     });
     group.finish();
@@ -104,9 +113,9 @@ fn bench_geoadd_100k(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    criterion_benchmark,
     bench_georadius,
     bench_geoadd,
-    bench_geoadd_100k
+    bench_geoadd_100k,
+    bench_geoadd_100k_bulk
 );
 criterion_main!(benches);

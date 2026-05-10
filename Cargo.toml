@@ -4,7 +4,7 @@ version = "0.4.0"
 authors = ["就眠儀式", "iceymoss"]
 edition = "2021"
 
-[dependencies]            
+[dependencies]
 bytes = "1.3.0"
 regex = "1.5.4"
 anyhow = "1.0.59"
@@ -25,6 +25,8 @@ chrono = { version = "0.4", features = ["serde"] }
 skiplist = "0.5"
 geojson = "0.24.2"
 rand = "0.8.5"
+geo = { version = "0.33.1", features = ["use-serde"] }
+rstar = { version = "0.12.2", features = ["serde"] }
 
 [dev-dependencies]
 redis = "1.0.1"
@@ -33,4 +35,8 @@ criterion = "0.5"
 
 [[bench]]
 name = "geo_bench"
+harness = false
+
+[[bench]]
+name = "geo_rtree_bench"
 harness = false
